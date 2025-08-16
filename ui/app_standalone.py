@@ -3,9 +3,17 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+# If something already imported a different "app" (e.g., from site-packages),
+# drop it so Python will import your local ./app next.
+mod = sys.modules.get("app")
+if mod is not None:
+    mod_path = (getattr(mod, "__file__", "") or "").replace("\\", "/")
+    if ROOT.replace("\\", "/") not in mod_path:
+        del sys.modules["app"]
+
 import streamlit as st
 
-# Load your services directly (standalone mode: no FastAPI needed)
+# Import your services from the LOCAL package
 from app.services import (
     summarizer,
     claim_extractor,
@@ -17,14 +25,13 @@ from app.services import (
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Streamlit page config
-st.set_page_config(page_title="TruthLens", layout="wide")
-st.title("TruthLens — Standalone")
+st.set_page_config(page_title="TruthLens — Standalone", layout="wide")
+st.title("TruthLens — Standalone (no backend)")
 
-# Copy selected Streamlit secrets into environment variables so that
-# app.config.Settings() (pydantic-settings) picks them up.
+# Copy Streamlit secrets → env so pydantic-settings can read them
 def _sync_env_from_secrets(keys):
     try:
-        secrets = st.secrets  # Streamlit injects this on Cloud
+        secrets = st.secrets
     except Exception:
         secrets = {}
     for k in keys:
@@ -33,28 +40,21 @@ def _sync_env_from_secrets(keys):
 
 _sync_env_from_secrets(["OPENAI_API_KEY", "TAVILY_API_KEY", "YT_API_KEY"])
 
-# Small helper: show whether keys are present
-def _key_status():
-    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-    has_tavily = bool(os.environ.get("TAVILY_API_KEY"))
-    st.caption(
-        f"OpenAI key: {'✅' if has_openai else '❌'} · "
-        f"Tavily key (optional): {'✅' if has_tavily else '⚪️ optional'}"
-    )
-
 with st.sidebar:
     st.subheader("Runtime")
-    _key_status()
+    st.caption(
+        f"OpenAI key: {'✅' if bool(os.environ.get('OPENAI_API_KEY')) else '❌'} · "
+        f"Tavily key (optional): {'✅' if bool(os.environ.get('TAVILY_API_KEY')) else '⚪️ optional'}"
+    )
     st.markdown(
-        "This **standalone** app calls your service modules directly — "
-        "no external FastAPI backend required."
+        "This app calls your service modules directly — "
+        "**no FastAPI server required**."
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Utilities
+# Helpers
 
 def _parse_sections(raw: str):
-    """Pick TL;DR / Executive Summary / Deep Dive from the summarizer output."""
     import re
     def section(name: str):
         m = re.search(rf"{name}\s*:?\s*\n(.+?)(?:\n\n|$)", raw, flags=re.IGNORECASE | re.DOTALL)
@@ -65,43 +65,30 @@ def _parse_sections(raw: str):
     return tldr, summary, deep
 
 def _run_pipeline(text: str) -> str:
-    """
-    Core pipeline:
-      1) Summarize content
-      2) Extract claims
-      3) Search web for snippets (if TAVILY_API_KEY present)
-      4) LLM fact-check support/contradiction
-      5) Aggregate Truth Score, compose Markdown report
-    Returns a Markdown string.
-    """
-    # 1) Summaries (requires OPENAI_API_KEY)
+    # 1) Summarize
     try:
         sum_raw = summarizer.summarize(text)["raw"]
     except Exception as e:
-        st.error(
-            "Summarizer failed. Make sure `OPENAI_API_KEY` is configured. "
-            f"\n\nDetails: {e}"
-        )
+        st.error("Summarizer failed. Is `OPENAI_API_KEY` set?\n\n" + str(e))
         st.stop()
 
     # 2) Claims
     try:
         claims_raw = claim_extractor.extract_claims(text, k=8) or []
     except Exception as e:
-        st.warning(f"Claim extraction failed; continuing without claims. Details: {e}")
+        st.warning(f"Claim extraction failed, continuing without claims. Details: {e}")
         claims_raw = []
 
-    # 3–4) For each claim, search & assess
+    # 3) Search + assess per claim (skip search if no provider)
     claim_assessments, global_sources = [], []
     for c in claims_raw:
         qlist = c.get("proposed_queries") or [c.get("text", "")]
         results = []
         for q in qlist[:3]:
             try:
-                # Will raise if no search provider configured; we just skip evidence in that case
                 results += searcher.search_web(q, max_results=3)
             except Exception:
-                # no TAVILY_API_KEY or provider error — skip silently, keep pipeline running
+                # No provider configured or search error — continue without evidence
                 pass
 
         snippets, se_list = [], []
@@ -110,9 +97,7 @@ def _run_pipeline(text: str) -> str:
             if not url:
                 continue
             tw = scoring.trust_weight(url)
-            se_list.append(
-                {"url": url, "title": r.get("title"), "snippet": r.get("snippet"), "trust_weight": tw}
-            )
+            se_list.append({"url": url, "title": r.get("title"), "snippet": r.get("snippet"), "trust_weight": tw})
             snippets.append(f"{r.get('title','')} — {r.get('snippet','')}")
 
         try:
@@ -120,27 +105,17 @@ def _run_pipeline(text: str) -> str:
         except Exception as e:
             assess = {"support_score": 0.0, "contradiction_score": 0.0, "rationale": f"Assessment error: {e}"}
 
-        item = {
-            "claim": {
-                "text": c.get("text", ""),
-                "snippet": c.get("snippet"),
-                "proposed_queries": qlist
-            },
+        claim_assessments.append({
+            "claim": {"text": c.get("text",""), "snippet": c.get("snippet"), "proposed_queries": qlist},
             "support_score": float(assess.get("support_score") or 0.0),
             "contradiction_score": float(assess.get("contradiction_score") or 0.0),
             "sources": se_list,
-            "rationale": assess.get("rationale", "")
-        }
-        claim_assessments.append(item)
+            "rationale": assess.get("rationale","")
+        })
         global_sources.extend(se_list)
 
-    # 5) Aggregate Truth Score + stars
     truth = scoring.aggregate_truth_score(claim_assessments)
-    stars = scoring.star_rating_from_quality(
-        clarity=0.8,
-        evidence=min(1.0, truth / 100.0),
-        bias=0.3
-    )
+    stars = scoring.star_rating_from_quality(clarity=0.8, evidence=min(1.0, truth/100.0), bias=0.3)
 
     tldr, summary, deep = _parse_sections(sum_raw)
 
@@ -171,10 +146,8 @@ def _run_pipeline(text: str) -> str:
                 for a in claim_assessments
             ]
         )
-        if claim_assessments
-        else "_No claims extracted or evidence search unavailable._"
+        if claim_assessments else "_No claims extracted or evidence search unavailable._"
     )
-
     return md
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -190,12 +163,12 @@ with tab1:
         else:
             with st.spinner("Fetching transcript…"):
                 try:
-                    text, _timed = transcript.fetch_transcript_youtube(url)
+                    text, _ = transcript.fetch_transcript_youtube(url)
                 except Exception as e:
-                    text, _timed = None, None
+                    text = None
                     st.error(f"Transcript fetch failed: {e}")
             if not text:
-                st.error("No public transcript found. Try a different video, or paste text in the Text/Web tab.")
+                st.error("No public transcript found. Try another video or use the Text/Web tab.")
             else:
                 with st.spinner("Analyzing…"):
                     md = _run_pipeline(text)
