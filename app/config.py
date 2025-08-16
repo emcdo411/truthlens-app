@@ -1,12 +1,14 @@
-from pydantic import BaseSettings, AnyHttpUrl
+# app/config.py
 from typing import Optional
+from pydantic import AnyHttpUrl
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
     GROQ_API_KEY: Optional[str] = None
 
-    # Search providers (choose one you have a key for)
+    # Search providers
     TAVILY_API_KEY: Optional[str] = None
     SERPER_API_KEY: Optional[str] = None
 
@@ -17,7 +19,9 @@ class Settings(BaseSettings):
     MAX_CLAIMS: int = 10
     MAX_SOURCES_PER_CLAIM: int = 5
 
-    class Config:
-        env_file = ".env"
+    # pydantic v2 settings config
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 settings = Settings()
+
+
