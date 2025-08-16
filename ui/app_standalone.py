@@ -1,18 +1,25 @@
-import sys
-import os
-import re
-import streamlit as st
-from datetime import datetime
-
-# Set up project root path safely
+# ui/app_standalone.py
+# ─────────────────────────────────────────────────────────────────────────────
+# Make sure the repo root is searched BEFORE site-packages so our local
+# ./app package wins over any third-party module named "app".
+import sys, os
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-# Avoid modifying sys.modules unless absolutely necessary
-# Ensure local 'app' module is used by prioritizing ROOT in sys.path
+# (optional safety) If some other "app" was already imported from site-packages,
+# purge it so Python will import our local ./app package instead.
+mod = sys.modules.get("app")
+if mod is not None:
+    mod_path = (getattr(mod, "__file__", "") or "").replace("\\", "/")
+    if ROOT.replace("\\", "/") not in mod_path:
+        del sys.modules["app"]
 
-# Import services from local package
+import re
+from datetime import datetime
+import streamlit as st
+
+# Import services from the LOCAL package
 try:
     from app.services import (
         summarizer,
@@ -23,7 +30,8 @@ try:
         transcript,
     )
 except ImportError as e:
-    st.error(f"Failed to import services: {e}. Ensure 'app.services' is correctly set up.")
+    st.error(f"Failed to import local services: {e}\n"
+             "Check that 'app/' exists and contains __init__.py files.")
     st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -31,34 +39,37 @@ except ImportError as e:
 st.set_page_config(page_title="TruthLens — Standalone", layout="wide")
 st.title("TruthLens — Standalone (no backend)")
 
-# Sync Streamlit secrets to environment variables
-def _sync_env_from_secrets(keys):
+# Sync Streamlit secrets → environment so pydantic-settings can read them.
+def sync_env_from_secrets(required: list[str], optional: list[str]) -> None:
     try:
         secrets = st.secrets
     except Exception:
         secrets = {}
-        st.warning("No secrets.toml found. Ensure API keys are set in environment variables.")
-    for key in keys:
-        if key in secrets and not os.environ.get(key):
-            os.environ[key] = str(secrets[key])
-        if not os.environ.get(key):
-            if key == "TAVILY_API_KEY":
-                st.warning(f"{key} not set. Search functionality will be skipped.")
-            else:
-                st.error(f"{key} is required but not set.")
-                st.stop()
+    # copy any present secrets to env (don’t overwrite existing env)
+    for k in required + optional:
+        if k in secrets and not os.environ.get(k):
+            os.environ[k] = str(secrets[k])
 
-# Sync required API keys
-_sync_env_from_secrets(["OPENAI_API_KEY", "TAVILY_API_KEY", "YT_API_KEY"])
+    # enforce only the truly required ones
+    missing = [k for k in required if not os.environ.get(k)]
+    if missing:
+        st.error("Missing required keys: " + ", ".join(missing))
+        st.stop()
 
-# Sidebar: Display API key status
+# Only OPENAI is required. TAVILY + YT are optional.
+sync_env_from_secrets(required=["OPENAI_API_KEY"], optional=["TAVILY_API_KEY", "YT_API_KEY"])
+
 with st.sidebar:
     st.subheader("Runtime Status")
-    st.caption(
-        f"OpenAI key: {'✅' if os.environ.get('OPENAI_API_KEY') else '❌'}<br>"
-        f"YouTube key: {'✅' if os.environ.get('YT_API_KEY') else '❌'}<br>"
-        f"Tavily key: {'✅' if os.environ.get('TAVILY_API_KEY') else '⚪️ optional'}",
-        unsafe_allow_html=True
+    st.markdown(
+        "OpenAI key: **{}**<br>"
+        "YouTube key: **{}**<br>"
+        "Tavily key: **{}**".format(
+            "✅" if os.environ.get("OPENAI_API_KEY") else "❌",
+            "✅" if os.environ.get("YT_API_KEY") else "⚪️ optional",
+            "✅" if os.environ.get("TAVILY_API_KEY") else "⚪️ optional",
+        ),
+        unsafe_allow_html=True,
     )
     st.markdown(
         "This app calls your service modules directly — "
@@ -68,117 +79,99 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 
-def _parse_sections(raw: str) -> tuple[list[str], str, str]:
+def parse_sections(raw: str) -> tuple[list[str], str, str]:
     """Parse TL;DR, Executive Summary, and Deep Dive sections from raw text."""
-    def extract_section(name: str) -> str:
-        pattern = rf"{name}\s*:?\s*\n(.+?)(?:\n\n|$)"
-        match = re.search(pattern, raw, flags=re.IGNORECASE | re.DOTALL)
-        return match.group(1).strip() if match else ""
-    
-    tldr = [x.strip("- ").strip() for x in extract_section("TL;DR").split("\n") if x.strip()]
-    summary = extract_section("Executive Summary")
-    deep = extract_section("Deep Dive")
-    return tldr or ["(no TL;DR extracted)"], summary or "(no executive summary extracted)", deep or "(no deep dive extracted)"
+    def extract(name: str) -> str:
+        m = re.search(rf"{name}\s*:?\s*\n(.+?)(?:\n\n|$)", raw, flags=re.IGNORECASE | re.DOTALL)
+        return m.group(1).strip() if m else ""
+    tldr = [x.strip("- ").strip() for x in extract("TL;DR").split("\n") if x.strip()]
+    summary = extract("Executive Summary") or "(no executive summary extracted)"
+    deep = extract("Deep Dive") or "(no deep dive extracted)"
+    return (tldr or ["(no TL;DR extracted)"], summary, deep)
 
-def _run_pipeline(text: str, source_type: str = "text", source_url: str = "") -> str:
-    """Run the TruthLens pipeline: summarize, extract claims, search, and assess."""
-    # Initialize report metadata
+def run_pipeline(text: str, source_type: str = "Text", source_url: str = "") -> str:
+    """Summarize → extract claims → (optional) search → assess → score → markdown."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    report_title = f"TruthLens Report ({source_type.capitalize()})"
+    title = f"TruthLens Report ({source_type})"
     if source_url:
-        report_title += f" - {source_url}"
+        title += f" — {source_url}"
 
-    # 1) Summarize
+    # 1) Summarize (requires OPENAI_API_KEY)
     try:
         sum_raw = summarizer.summarize(text)["raw"]
     except Exception as e:
-        st.error(f"Summarizer failed: {e}. Ensure OPENAI_API_KEY is valid.")
+        st.error(f"Summarizer failed. Ensure OPENAI_API_KEY is valid.\n\nDetails: {e}")
         st.stop()
 
-    # 2) Extract claims
-    claims_raw = []
+    # 2) Claims
     try:
         claims_raw = claim_extractor.extract_claims(text, k=8) or []
     except Exception as e:
-        st.warning(f"Claim extraction failed: {e}. Continuing without claims.")
+        st.warning(f"Claim extraction failed; continuing without claims. Details: {e}")
+        claims_raw = []
 
-    # 3) Search and assess claims
-    claim_assessments = []
-    global_sources = []
+    # 3) Search + assess per-claim (skip search if no provider)
     has_search = bool(os.environ.get("TAVILY_API_KEY"))
+    claim_assessments, global_sources = [], []
+    for c in claims_raw:
+        ctext = c.get("text", "")
+        qlist = (c.get("proposed_queries") or [ctext])[:3]
 
-    for claim in claims_raw:
-        claim_text = claim.get("text", "")
-        queries = claim.get("proposed_queries", [claim_text])[:3]
-        search_results = []
-
+        results = []
         if has_search:
-            for query in queries:
+            for q in qlist:
                 try:
-                    search_results += searcher.search_web(query, max_results=3)
-                except Exception as e:
-                    st.warning(f"Search failed for query '{query}': {e}. Skipping.")
+                    results += searcher.search_web(q, max_results=3)
+                except Exception:
+                    # No provider configured or API error — skip silently
+                    pass
 
-        # Process search results
-        source_entries = []
-        snippets = []
-        for result in search_results[:5]:
-            url = result.get("url")
+        snippets, se_list = [], []
+        for r in results[:5]:
+            url = r.get("url")
             if not url:
                 continue
-            trust_weight = scoring.trust_weight(url)
-            source_entry = {
-                "url": url,
-                "title": result.get("title", ""),
-                "snippet": result.get("snippet", ""),
-                "trust_weight": trust_weight
-            }
-            source_entries.append(source_entry)
-            snippets.append(f"{source_entry['title']} — {source_entry['snippet']}")
-            global_sources.append(source_entry)
+            tw = scoring.trust_weight(url)
+            se_list.append({"url": url, "title": r.get("title"), "snippet": r.get("snippet"), "trust_weight": tw})
+            snippets.append(f"{r.get('title','')} — {r.get('snippet','')}")
 
-        # Assess claim
         try:
-            assessment = fact_checker.assess_claim(claim_text, snippets)
-            support_score = float(assessment.get("support_score", 0.0))
-            contradiction_score = float(assessment.get("contradiction_score", 0.0))
-            rationale = assessment.get("rationale", "No rationale provided.")
+            assess = fact_checker.assess_claim(ctext, snippets)
         except Exception as e:
-            support_score, contradiction_score = 0.0, 0.0
-            rationale = f"Assessment failed: {e}"
+            assess = {"support_score": 0.0, "contradiction_score": 0.0, "rationale": f"Assessment error: {e}"}
 
         claim_assessments.append({
-            "claim": {"text": claim_text, "snippet": claim.get("snippet", ""), "proposed_queries": queries},
-            "support_score": support_score,
-            "contradiction_score": contradiction_score,
-            "sources": source_entries,
-            "rationale": rationale
+            "claim": {"text": ctext, "snippet": c.get("snippet", ""), "proposed_queries": qlist},
+            "support_score": float(assess.get("support_score") or 0.0),
+            "contradiction_score": float(assess.get("contradiction_score") or 0.0),
+            "sources": se_list,
+            "rationale": assess.get("rationale", ""),
         })
+        global_sources.extend(se_list)
 
-    # Calculate scores
-    truth_score = scoring.aggregate_truth_score(claim_assessments)
-    stars = scoring.star_rating_from_quality(clarity=0.8, evidence=min(1.0, truth_score/100.0), bias=0.3)
+    # 4) Score + stars
+    truth = scoring.aggregate_truth_score(claim_assessments)
+    stars = scoring.star_rating_from_quality(
+        clarity=0.8,
+        evidence=min(1.0, truth / 100.0),
+        bias=0.3,
+    )
 
-    # Parse summary sections
-    tldr, summary, deep = _parse_sections(sum_raw)
-
-    # Generate markdown report
-    md = f"""# {report_title}
-**Generated:** {timestamp}  
-**Truth Score:** {truth_score:.1f}/100  
-**Stars (Critical Style):** {stars:.1f}/5
-
-## TL;DR
-- {"\n- ".join(tldr)}
-
-## Executive Summary
-{summary}
-
-## Deep Dive
-{deep}
-
-## Claims & Evidence
-"""
+    # 5) Compose report
+    tldr, summary, deep = parse_sections(sum_raw)
+    md = (
+        f"# {title}\n"
+        f"**Generated:** {timestamp}  \n"
+        f"**Truth Score:** {truth:.1f}/100  \n"
+        f"**Stars (Critical Style):** {stars:.1f}/5\n\n"
+        "## TL;DR\n"
+        "- " + "\n- ".join(tldr) + "\n\n"
+        "## Executive Summary\n"
+        f"{summary}\n\n"
+        "## Deep Dive\n"
+        f"{deep}\n\n"
+        "## Claims & Evidence\n"
+    )
     if claim_assessments:
         md += "\n".join(
             f"- **Claim:** {a['claim']['text']}\n"
@@ -192,7 +185,6 @@ def _run_pipeline(text: str, source_type: str = "text", source_url: str = "") ->
         )
     else:
         md += "_No claims extracted or evidence search unavailable._"
-
     return md
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -202,36 +194,37 @@ tab1, tab2 = st.tabs(["YouTube", "Text/Web"])
 
 with tab1:
     url = st.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
-    analyze_button = st.button("Analyze YouTube", disabled=not bool(os.environ.get("YT_API_KEY")))
-    
-    if analyze_button and url.strip():
-        # Basic YouTube URL validation
-        if not re.match(r"^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/)[\w-]{11}", url):
-            st.warning("Please enter a valid YouTube URL (e.g., https://www.youtube.com/watch?v=...).")
+    if st.button("Analyze YouTube"):
+        if not url.strip():
+            st.warning("Please paste a YouTube URL.")
+        elif not re.match(r"^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/)[\w\-]{11}", url):
+            st.warning("Please enter a valid YouTube URL.")
         else:
             with st.spinner("Fetching transcript…"):
                 try:
-                    text, metadata = transcript.fetch_transcript_youtube(url)
-                    video_title = metadata.get("title", "Unknown Video")
+                    # Expect (text, timed) from transcript service
+                    text, _timed = transcript.fetch_transcript_youtube(url)
                 except Exception as e:
-                    st.error(f"Failed to fetch transcript: {e}. Ensure YT_API_KEY is valid and the video has a public transcript.")
-                    st.stop()
-            
-            with st.spinner("Analyzing…"):
-                md = _run_pipeline(text, source_type="YouTube", source_url=url)
-            st.success("Done.")
-            st.markdown(md)
-            st.download_button(
-                "Download report (.md)",
-                md,
-                file_name=f"truthlens_youtube_{video_title.replace(' ', '_')}.md"
-            )
+                    text = None
+                    st.error(f"Transcript fetch failed: {e}")
+            if not text:
+                st.error("No public transcript found. Try another video or paste text in the Text/Web tab.")
+            else:
+                with st.spinner("Analyzing…"):
+                    md = run_pipeline(text, source_type="YouTube", source_url=url)
+                st.success("Done.")
+                st.markdown(md)
+                st.download_button("Download report (.md)", md, file_name="truthlens_youtube.md")
 
 with tab2:
     content = st.text_area("Paste text you have rights to use", height=220)
-    if st.button("Analyze Text") and content.strip():
-        with st.spinner("Analyzing…"):
-            md = _run_pipeline(content, source_type="Text")
-        st.success("Done.")
-        st.markdown(md)
-        st.download_button("Download report (.md)", md, file_name="truthlens_text_report.md")
+    if st.button("Analyze Text"):
+        if not content.strip():
+            st.warning("Please paste some text.")
+        else:
+            with st.spinner("Analyzing…"):
+                md = run_pipeline(content, source_type="Text")
+            st.success("Done.")
+            st.markdown(md)
+            st.download_button("Download report (.md)", md, file_name="truthlens_text_report.md")
+
