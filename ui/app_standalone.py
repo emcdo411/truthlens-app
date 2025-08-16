@@ -1,25 +1,23 @@
 # ui/app_standalone.py
 # ─────────────────────────────────────────────────────────────────────────────
-# Make sure the repo root is searched BEFORE site-packages so our local
-# ./app package wins over any third-party module named "app".
+# Force our repo's ./app package to win (before any third-party "app" module).
 import sys, os
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-# (optional safety) If some other "app" was already imported from site-packages,
-# purge it so Python will import our local ./app package instead.
-mod = sys.modules.get("app")
-if mod is not None:
-    mod_path = (getattr(mod, "__file__", "") or "").replace("\\", "/")
-    if ROOT.replace("\\", "/") not in mod_path:
+# If some other "app" was preloaded from site-packages, drop it.
+_mod = sys.modules.get("app")
+if _mod is not None:
+    _mod_path = (getattr(_mod, "__file__", "") or "").replace("\\", "/")
+    if ROOT.replace("\\", "/") not in _mod_path:
         del sys.modules["app"]
 
 import re
 from datetime import datetime
 import streamlit as st
 
-# Import services from the LOCAL package
+# Import our LOCAL services package
 try:
     from app.services import (
         summarizer,
@@ -29,34 +27,41 @@ try:
         scoring,
         transcript,
     )
-except ImportError as e:
-    st.error(f"Failed to import local services: {e}\n"
-             "Check that 'app/' exists and contains __init__.py files.")
+except Exception as e:
+    st.error(
+        "Failed to import local services. "
+        "Make sure the repo has an 'app' folder with __init__.py files.\n\n"
+        f"Import error: {e}"
+    )
     st.stop()
 
+# (debug) show which 'app' got imported
+try:
+    import importlib
+    st.caption(f"Using app package at: {importlib.import_module('app').__file__}")
+except Exception:
+    pass
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Streamlit page config
+# Page config
 st.set_page_config(page_title="TruthLens — Standalone", layout="wide")
 st.title("TruthLens — Standalone (no backend)")
 
-# Sync Streamlit secrets → environment so pydantic-settings can read them.
+# Copy Streamlit secrets → env so pydantic-settings can read them.
 def sync_env_from_secrets(required: list[str], optional: list[str]) -> None:
     try:
         secrets = st.secrets
     except Exception:
         secrets = {}
-    # copy any present secrets to env (don’t overwrite existing env)
     for k in required + optional:
         if k in secrets and not os.environ.get(k):
             os.environ[k] = str(secrets[k])
-
-    # enforce only the truly required ones
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
         st.error("Missing required keys: " + ", ".join(missing))
         st.stop()
 
-# Only OPENAI is required. TAVILY + YT are optional.
+# Only OpenAI is strictly required; Tavily + YT are optional.
 sync_env_from_secrets(required=["OPENAI_API_KEY"], optional=["TAVILY_API_KEY", "YT_API_KEY"])
 
 with st.sidebar:
@@ -71,16 +76,12 @@ with st.sidebar:
         ),
         unsafe_allow_html=True,
     )
-    st.markdown(
-        "This app calls your service modules directly — "
-        "**no FastAPI server required**."
-    )
+    st.markdown("This app calls your service modules directly — **no FastAPI server required**.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 
 def parse_sections(raw: str) -> tuple[list[str], str, str]:
-    """Parse TL;DR, Executive Summary, and Deep Dive sections from raw text."""
     def extract(name: str) -> str:
         m = re.search(rf"{name}\s*:?\s*\n(.+?)(?:\n\n|$)", raw, flags=re.IGNORECASE | re.DOTALL)
         return m.group(1).strip() if m else ""
@@ -90,13 +91,10 @@ def parse_sections(raw: str) -> tuple[list[str], str, str]:
     return (tldr or ["(no TL;DR extracted)"], summary, deep)
 
 def run_pipeline(text: str, source_type: str = "Text", source_url: str = "") -> str:
-    """Summarize → extract claims → (optional) search → assess → score → markdown."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    title = f"TruthLens Report ({source_type})"
-    if source_url:
-        title += f" — {source_url}"
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    title = f"TruthLens Report ({source_type})" + (f" — {source_url}" if source_url else "")
 
-    # 1) Summarize (requires OPENAI_API_KEY)
+    # 1) Summarize
     try:
         sum_raw = summarizer.summarize(text)["raw"]
     except Exception as e:
@@ -110,7 +108,7 @@ def run_pipeline(text: str, source_type: str = "Text", source_url: str = "") -> 
         st.warning(f"Claim extraction failed; continuing without claims. Details: {e}")
         claims_raw = []
 
-    # 3) Search + assess per-claim (skip search if no provider)
+    # 3) Search + assess (skip search if no provider)
     has_search = bool(os.environ.get("TAVILY_API_KEY"))
     claim_assessments, global_sources = [], []
     for c in claims_raw:
@@ -123,7 +121,6 @@ def run_pipeline(text: str, source_type: str = "Text", source_url: str = "") -> 
                 try:
                     results += searcher.search_web(q, max_results=3)
                 except Exception:
-                    # No provider configured or API error — skip silently
                     pass
 
         snippets, se_list = [], []
@@ -149,19 +146,13 @@ def run_pipeline(text: str, source_type: str = "Text", source_url: str = "") -> 
         })
         global_sources.extend(se_list)
 
-    # 4) Score + stars
     truth = scoring.aggregate_truth_score(claim_assessments)
-    stars = scoring.star_rating_from_quality(
-        clarity=0.8,
-        evidence=min(1.0, truth / 100.0),
-        bias=0.3,
-    )
+    stars = scoring.star_rating_from_quality(clarity=0.8, evidence=min(1.0, truth / 100.0), bias=0.3)
 
-    # 5) Compose report
     tldr, summary, deep = parse_sections(sum_raw)
     md = (
         f"# {title}\n"
-        f"**Generated:** {timestamp}  \n"
+        f"**Generated:** {ts}  \n"
         f"**Truth Score:** {truth:.1f}/100  \n"
         f"**Stars (Critical Style):** {stars:.1f}/5\n\n"
         "## TL;DR\n"
@@ -202,13 +193,12 @@ with tab1:
         else:
             with st.spinner("Fetching transcript…"):
                 try:
-                    # Expect (text, timed) from transcript service
                     text, _timed = transcript.fetch_transcript_youtube(url)
                 except Exception as e:
                     text = None
                     st.error(f"Transcript fetch failed: {e}")
             if not text:
-                st.error("No public transcript found. Try another video or paste text in the Text/Web tab.")
+                st.error("No public transcript found. Try another video or use the Text/Web tab.")
             else:
                 with st.spinner("Analyzing…"):
                     md = run_pipeline(text, source_type="YouTube", source_url=url)
