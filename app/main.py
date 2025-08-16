@@ -11,8 +11,7 @@ def root():
 def health():
     return {"status": "ok"}
 
+# Routers
 app.include_router(text.router)
 app.include_router(youtube.router)
 app.include_router(web.router)
-
-
