@@ -114,42 +114,39 @@ make ui    # Streamlit at http://localhost:8501
 
 ```mermaid
 flowchart LR
-  %% top-level
-  A[Input] -->|YouTube URL / Text / Web| ING
+  A["Input"] -->|"YouTube URL / Text / Web"| ING
 
-  %% ingestion
-  subgraph ING[Ingestion]
+  subgraph ING["Ingestion"]
     direction TB
-    YT[YouTube Transcript / Captions]
-    TX[User-Provided Text]
-    WB[User-Extracted Web Text]
+    YT["YouTube transcript or captions"]
+    TX["User-provided text"]
+    WB["User-extracted web text"]
   end
 
-  ING --> N[Normalize / Clean]
-  N --> SUM[Summarizer LLM]
-  N --> CLM[Claim Extractor LLM]
+  ING --> N["Normalize / Clean"]
+  N --> SUM["Summarizer LLM"]
+  N --> CLM["Claim Extractor LLM"]
 
-  %% search & evidence
-  subgraph EVID[Evidence Search]
+  subgraph EVID["Evidence Search"]
     direction TB
-    CLM --> QUE[Query Builder]
-    QUE --> SRCH[Search Provider (Tavily/Serper/DDG)]
-    SRCH --> SNIP[Top-N Results + Snippets]
+    CLM --> QUE["Query Builder"]
+    QUE --> SRCH["Search Provider (Tavily, Serper, DDG)"]
+    SRCH --> SNIP["Top-N results + snippets"]
   end
 
-  SNIP --> FACT[Fact Checker LLM]
-  FACT --> ASM[Per-Claim Assessment (support/contra/rationale)]
+  SNIP --> FACT["Fact Checker LLM"]
+  FACT --> ASM["Per-claim assessment (support / contradiction / rationale)"]
 
-  %% scoring & report
-  subgraph OUT[Scoring & Reports]
+  subgraph OUT["Scoring & Reports"]
     direction TB
-    ASM --> SCORE[Truth Scoring (0–100) + Trust Weighting]
-    SUM --> RPT[Report Builder]
+    ASM --> SCORE["Truth scoring (0-100) + trust weighting"]
+    SUM --> RPT["Report builder"]
     SCORE --> RPT
     ASM --> RPT
-    RPT --> MD[(Markdown)]
-    RPT --> JSON[(JSON)]
+    RPT --> MD["Markdown"]
+    RPT --> JSON["JSON"]
   end
+
 ```
 
 ## Examples
@@ -170,6 +167,7 @@ MIT
 ```
 
 ---
+
 
 
 
