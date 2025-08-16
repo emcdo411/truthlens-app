@@ -34,3 +34,67 @@ pip install -r requirements.txt
 cp .env.example .env  # add your keys
 make run  # FastAPI at http://localhost:8000
 make ui   # Streamlit at http://localhost:8501
+API Endpoints
+POST /analyze/youtube → { "url": "https://youtu.be/..." }
+
+POST /analyze/text → { "content": "your text" }
+
+POST /analyze/web → { "url": "...", "extracted_text": "..." }
+
+Note: Provide text you have the right to use. Do not scrape or republish copyrighted content.
+
+How Truth Scoring Works
+Extract top claims with LLM
+
+Search web (Tavily/Serper/DDG) for independent sources
+
+LLM assesses support vs contradiction using snippets
+
+Aggregate to a final 0–100 with a transparent rubric
+
+Legal & Ethics
+Use official APIs where possible (YouTube Data API)
+
+Avoid scraping paywalled or copyrighted text (e.g., Amazon “Look Inside”)
+
+Whisper transcription is local and opt-in for personal research
+
+Reports include links & short quotes/snippets under fair use (brief, attributed)
+
+Architecture
+mermaid
+Copy
+Edit
+flowchart LR
+A[Input (YouTube URL / Text)] --> B[Transcript/Content]
+B --> C[Summarizer LLM]
+B --> D[Claim Extractor LLM]
+D --> E[Search Provider (Tavily/Serper/DDG)]
+E --> F[Fact Checker LLM]
+F --> G[Scoring (0–100)]
+C --> H[Markdown + JSON]
+G --> H
+Examples
+YouTube: Provide URL with public transcript → get TL;DW, Summary, Deep Dive, Claims, Truth Score
+
+Books: Paste your own foreword/excerpt text → same pipeline
+
+Roadmap
+Multi-provider LLM router
+
+PDF ingestion
+
+Per-claim confidence intervals
+
+License
+MIT
+
+yaml
+Copy
+Edit
+
+---
+
+### How to use it on your example book
+For *The Founding Myth* by Andrew L. Seidel, paste a short, legally shareable excerpt (e.g., your notes or publicly posted quotations) into the `/analyze/text` endpoint. The app will produce the deep-dive, claim table, truth score, and a “critical-style” star rating. (You can also attach a bibliography of sources for stronger corroboration.)
+---
