@@ -6,4 +6,4 @@ requests==2.32.3
 youtube-transcript-api==0.6.2
 streamlit==1.37.1
 pydantic-settings==2.3.4
-
+openai>=1.35.0
