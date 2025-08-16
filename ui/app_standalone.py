@@ -1,6 +1,7 @@
-# Ensure repo root is on sys.path for Streamlit Cloud
+# Ensure repo root is on sys.path (needed on Streamlit Cloud)
 import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from app.services import summarizer, claim_extractor, searcher, fact_checker, scoring, transcript
 
 st.set_page_config(page_title="TruthLens", layout="wide")
