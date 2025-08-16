@@ -114,38 +114,43 @@ make ui    # Streamlit at http://localhost:8501
 
 ```mermaid
 flowchart LR
-  %% High-level pipeline with subgraphs (GitHub supports Mermaid)
-  A[Input] -->|YouTube URL / Text / Web| B[Ingestion]
+  %% top-level
+  A[Input] -->|YouTube URL / Text / Web| ING
 
-  subgraph Ingestion
-    B1[YouTube transcript\n(API or public captions)]
-    B2[User-provided text]
-    B3[Web page text\n(user-extracted)]
-  end
-
-  B --> C[Normalization]
-  C --> D[LLM Summarizer]
-  C --> E[Claim Extractor]
-
-  subgraph Evidence Search
+  %% ingestion
+  subgraph ING[Ingestion]
     direction TB
-    E --> S1[Query Builder]
-    S1 --> S2[Search Provider\n(Tavily/Serper/DDG)]
-    S2 --> S3[Top N Results + Snippets]
+    YT[YouTube Transcript / Captions]
+    TX[User-Provided Text]
+    WB[User-Extracted Web Text]
   end
 
-  S3 --> F[Fact Checker LLM]
-  F --> G[Per-Claim Assessment\nsupport/contradiction/rationale]
+  ING --> N[Normalize / Clean]
+  N --> SUM[Summarizer LLM]
+  N --> CLM[Claim Extractor LLM]
 
-  subgraph Scoring & Reports
+  %% search & evidence
+  subgraph EVID[Evidence Search]
     direction TB
-    G --> H[Truth Scoring (0–100)\n+ Trust weighting]
-    D --> I[Executive Summary\n+ Deep Dive]
-    H --> J[Markdown Report]
-    I --> J
-    G --> J
-    J --> K[JSON Output]
+    CLM --> QUE[Query Builder]
+    QUE --> SRCH[Search Provider (Tavily/Serper/DDG)]
+    SRCH --> SNIP[Top-N Results + Snippets]
   end
+
+  SNIP --> FACT[Fact Checker LLM]
+  FACT --> ASM[Per-Claim Assessment (support/contra/rationale)]
+
+  %% scoring & report
+  subgraph OUT[Scoring & Reports]
+    direction TB
+    ASM --> SCORE[Truth Scoring (0–100) + Trust Weighting]
+    SUM --> RPT[Report Builder]
+    SCORE --> RPT
+    ASM --> RPT
+    RPT --> MD[(Markdown)]
+    RPT --> JSON[(JSON)]
+  end
+
 ```
 
 ## Examples
@@ -166,5 +171,6 @@ MIT
 ```
 
 ---
+
 
 
