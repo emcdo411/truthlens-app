@@ -1,8 +1,10 @@
-# ui/app_standalone.py
-# ─────────────────────────────────────────────────────────────────────────────
-# Ensure the repo root is searched BEFORE site-packages (prevents 3rd-party
-# "app" modules from shadowing your local ./app package).
 import sys, os
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from app.services import summarizer, claim_extractor, searcher, fact_checker, scoring, transcript
+import streamlit as st
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
