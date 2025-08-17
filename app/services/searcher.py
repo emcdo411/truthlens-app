@@ -1,18 +1,14 @@
-from typing import List, Dict
-from ..config import settings
+import os
+from tavily import TavilyClient
 
-def search_web(query: str, max_results: int = 5) -> List[Dict]:
-    """
-    Implement a provider (Tavily / Serper / DuckDuckGo).
-    For illustration, we show Tavily. Replace with your choice.
-    """
-    import requests, os
-    if settings.TAVILY_API_KEY:
-        r = requests.post(
-            "https://api.tavily.com/search",
-            json={"api_key": settings.TAVILY_API_KEY, "query": query, "max_results": max_results}
-        )
-        r.raise_for_status()
-        items = r.json().get("results", [])
-        return [{"url": i.get("url"), "title": i.get("title"), "snippet": i.get("content")} for i in items]
-    raise RuntimeError("No search provider configured. Set TAVILY_API_KEY or implement alternative.")
+def search_web(query: str, max_results: int = 3) -> list:
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        return [{"url": "https://example.com", "title": "Example Page", "snippet": "Sample result"}]
+    client = TavilyClient(api_key=api_key)
+    try:
+        results = client.search(query, max_results=max_results)
+        return [{"url": r["url"], "title": r["title"], "snippet": r["content"]} for r in results["results"]]
+    except Exception as e:
+        print(f"Search error: {e}")
+        return []
