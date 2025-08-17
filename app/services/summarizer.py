@@ -1,5 +1,4 @@
 from .llm import llm_complete
-from typing import List, Optional
 
 SUMMARY_PROMPT = """You are an analyst.
 Given CONTENT below, produce:
