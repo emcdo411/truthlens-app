@@ -15,3 +15,4 @@ __all__ = (
     "star_rating_from_quality",
     "fetch_transcript_youtube",
 )
+
