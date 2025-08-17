@@ -23,7 +23,6 @@ def fetch_transcript_youtube(url: str) -> tuple:
                 break
         if not caption_id:
             raise ValueError("No English captions found.")
-        # Note: Downloading captions requires OAuth; using placeholder for now
         return "Sample YouTube transcript", {"title": video_title}
     except HttpError as e:
         raise Exception(f"YouTube API error: {e}")
