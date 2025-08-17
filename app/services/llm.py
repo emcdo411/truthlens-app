@@ -1,19 +1,19 @@
-from typing import Literal, Optional, List
-from . import summarizer
-from ..config import settings
 import os
+from openai import OpenAI
 
-# Simple provider-agnostic wrapper (OpenAI default)
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
+def llm_complete(prompt: str, model: str = None) -> str:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("No OPENAI_API_KEY set. Add it to secrets.toml or environment variables.")
+    client = OpenAI(api_key=api_key)
+    model = model or "gpt-3.5-turbo"
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        raise RuntimeError(f"OpenAI API error: {e}")
 
-def llm_complete(prompt: str, model: Optional[str] = None) -> str:
-    if settings.OPENAI_API_KEY and OpenAI:
-        client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        mdl = model or "gpt-4.1-mini"
-        resp = client.responses.create(model=mdl, input=prompt)
-        return resp.output_text
-    # Fallback: raise informative error
-    raise RuntimeError("No LLM provider configured. Set OPENAI_API_KEY (or extend llm.py).")
