@@ -17,3 +17,4 @@ def llm_complete(prompt: str, model: str = None) -> str:
     except Exception as e:
         raise RuntimeError(f"OpenAI API error: {e}")
 
+
