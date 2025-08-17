@@ -1,11 +1,17 @@
-# app/services/__init__.py
-from . import summarizer, claim_extractor, searcher, fact_checker, scoring, transcript
+from .summarizer import summarize
+from .claim_extractor import extract_claims
+from .searcher import search_web
+from .fact_checker import assess_claim
+from .scoring import trust_weight, aggregate_truth_score, star_rating_from_quality
+from .transcript import fetch_transcript_youtube
 
 __all__ = (
-    "summarizer",
-    "claim_extractor",
-    "searcher",
-    "fact_checker",
-    "scoring",
-    "transcript",
+    "summarize",
+    "extract_claims",
+    "search_web",
+    "assess_claim",
+    "trust_weight",
+    "aggregate_truth_score",
+    "star_rating_from_quality",
+    "fetch_transcript_youtube",
 )
