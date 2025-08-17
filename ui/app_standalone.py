@@ -1,67 +1,71 @@
-# ui/app_standalone.py
-# ─────────────────────────────────────────────────────────────────────────────
-# Force our repo's ./app package to win (before any third-party "app" module).
-import sys, os
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-
-# If some other "app" was preloaded from site-packages, drop it.
-_mod = sys.modules.get("app")
-if _mod is not None:
-    _mod_path = (getattr(_mod, "__file__", "") or "").replace("\\", "/")
-    if ROOT.replace("\\", "/") not in _mod_path:
-        del sys.modules["app"]
-
+import sys
+import os
 import re
 from datetime import datetime
 import streamlit as st
 
-# Import our LOCAL services package
+# Set the project root to the truthlens folder
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+# Debug paths to diagnose import issues
+print(f"Project root: {ROOT}")
+print(f"Python search paths: {sys.path}")
+print(f"Does 'app' folder exist? {os.path.exists(os.path.join(ROOT, 'app'))}")
+print(f"Does 'app/services' folder exist? {os.path.exists(os.path.join(ROOT, 'app', 'services'))}")
+print(f"Files in 'app/services': {os.listdir(os.path.join(ROOT, 'app', 'services')) if os.path.exists(os.path.join(ROOT, 'app', 'services')) else 'Not found'}")
+print(f"Does 'app/config.py' exist? {os.path.exists(os.path.join(ROOT, 'app', 'config.py'))}")
+
+# Try to load the services
 try:
     from app.services import (
-        summarizer,
-        claim_extractor,
-        searcher,
-        fact_checker,
-        scoring,
-        transcript,
+        summarize,
+        extract_claims,
+        search_web,
+        assess_claim,
+        trust_weight,
+        aggregate_truth_score,
+        star_rating_from_quality,
+        fetch_transcript_youtube,
     )
-except Exception as e:
+except ImportError as e:
     st.error(
-        "Failed to import local services. "
-        "Make sure the repo has an 'app' folder with __init__.py files.\n\n"
-        f"Import error: {e}"
+        f"Error loading services: {e}. "
+        "Check that the 'app' folder is in your truthlens folder, "
+        "and the 'services' folder has these files: llm.py, summarizer.py, claim_extractor.py, "
+        "searcher.py, fact_checker.py, scoring.py, transcript.py, plus __init__.py. "
+        "Also ensure 'app/config.py' exists."
     )
     st.stop()
 
-# (debug) show which 'app' got imported
+# Show which 'app' package is loaded
 try:
     import importlib
     st.caption(f"Using app package at: {importlib.import_module('app').__file__}")
 except Exception:
     pass
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Page config
 st.set_page_config(page_title="TruthLens — Standalone", layout="wide")
 st.title("TruthLens — Standalone (no backend)")
 
-# Copy Streamlit secrets → env so pydantic-settings can read them.
+# Copy Streamlit secrets to environment variables
 def sync_env_from_secrets(required: list[str], optional: list[str]) -> None:
     try:
         secrets = st.secrets
     except Exception:
         secrets = {}
+        st.warning("No secrets.toml found. Ensure API keys are set in environment variables.")
     for k in required + optional:
         if k in secrets and not os.environ.get(k):
             os.environ[k] = str(secrets[k])
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
-        st.error("Missing required keys: " + ", ".join(missing))
+        st.error(f"Missing required keys: {', '.join(missing)}")
         st.stop()
 
-# Only OpenAI is strictly required; Tavily + YT are optional.
+# Only OpenAI is strictly required; Tavily and YouTube are optional
 sync_env_from_secrets(required=["OPENAI_API_KEY"], optional=["TAVILY_API_KEY", "YT_API_KEY"])
 
 with st.sidebar:
@@ -78,9 +82,7 @@ with st.sidebar:
     )
     st.markdown("This app calls your service modules directly — **no FastAPI server required**.")
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
-
 def parse_sections(raw: str) -> tuple[list[str], str, str]:
     def extract(name: str) -> str:
         m = re.search(rf"{name}\s*:?\s*\n(.+?)(?:\n\n|$)", raw, flags=re.IGNORECASE | re.DOTALL)
@@ -96,73 +98,90 @@ def run_pipeline(text: str, source_type: str = "Text", source_url: str = "") -> 
 
     # 1) Summarize
     try:
-        sum_raw = summarizer.summarize(text)["raw"]
+        sum_raw = summarize(text)["raw"]
     except Exception as e:
-        st.error(f"Summarizer failed. Ensure OPENAI_API_KEY is valid.\n\nDetails: {e}")
+        st.error(f"Summarizer failed: {e}. Ensure OPENAI_API_KEY is valid.")
         st.stop()
 
-    # 2) Claims
+    # 2) Extract claims
+    claims_raw = []
     try:
-        claims_raw = claim_extractor.extract_claims(text, k=8) or []
+        claims_raw = extract_claims(text, k=8) or []
     except Exception as e:
-        st.warning(f"Claim extraction failed; continuing without claims. Details: {e}")
-        claims_raw = []
+        st.warning(f"Claim extraction failed: {e}. Continuing without claims.")
 
-    # 3) Search + assess (skip search if no provider)
+    # 3) Search and assess claims
+    claim_assessments = []
+    global_sources = []
     has_search = bool(os.environ.get("TAVILY_API_KEY"))
-    claim_assessments, global_sources = [], []
-    for c in claims_raw:
-        ctext = c.get("text", "")
-        qlist = (c.get("proposed_queries") or [ctext])[:3]
 
-        results = []
+    for claim in claims_raw:
+        claim_text = claim.get("text", "")
+        queries = claim.get("proposed_queries", [claim_text])[:3]
+        search_results = []
+
         if has_search:
-            for q in qlist:
+            for query in queries:
                 try:
-                    results += searcher.search_web(q, max_results=3)
-                except Exception:
-                    pass
+                    search_results += search_web(query, max_results=3)
+                except Exception as e:
+                    st.warning(f"Search failed for query '{query}': {e}. Skipping.")
 
-        snippets, se_list = [], []
-        for r in results[:5]:
-            url = r.get("url")
+        source_entries = []
+        snippets = []
+        for result in search_results[:5]:
+            url = result.get("url")
             if not url:
                 continue
-            tw = scoring.trust_weight(url)
-            se_list.append({"url": url, "title": r.get("title"), "snippet": r.get("snippet"), "trust_weight": tw})
-            snippets.append(f"{r.get('title','')} — {r.get('snippet','')}")
+            trust_score = trust_weight(url)
+            source_entry = {
+                "url": url,
+                "title": result.get("title", ""),
+                "snippet": result.get("snippet", ""),
+                "trust_weight": trust_score
+            }
+            source_entries.append(source_entry)
+            snippets.append(f"{source_entry['title']} — {source_entry['snippet']}")
+            global_sources.append(source_entry)
 
         try:
-            assess = fact_checker.assess_claim(ctext, snippets)
+            assessment = assess_claim(claim_text, snippets)
+            support_score = float(assessment.get("support_score", 0.0))
+            contradiction_score = float(assessment.get("contradiction_score", 0.0))
+            rationale = assessment.get("rationale", "No rationale provided.")
         except Exception as e:
-            assess = {"support_score": 0.0, "contradiction_score": 0.0, "rationale": f"Assessment error: {e}"}
+            support_score, contradiction_score = 0.0, 0.0
+            rationale = f"Assessment failed: {e}"
 
         claim_assessments.append({
-            "claim": {"text": ctext, "snippet": c.get("snippet", ""), "proposed_queries": qlist},
-            "support_score": float(assess.get("support_score") or 0.0),
-            "contradiction_score": float(assess.get("contradiction_score") or 0.0),
-            "sources": se_list,
-            "rationale": assess.get("rationale", ""),
+            "claim": {"text": claim_text, "snippet": claim.get("snippet", ""), "proposed_queries": queries},
+            "support_score": support_score,
+            "contradiction_score": contradiction_score,
+            "sources": source_entries,
+            "rationale": rationale
         })
-        global_sources.extend(se_list)
 
-    truth = scoring.aggregate_truth_score(claim_assessments)
-    stars = scoring.star_rating_from_quality(clarity=0.8, evidence=min(1.0, truth / 100.0), bias=0.3)
+    truth_score = aggregate_truth_score(claim_assessments)
+    stars = star_rating_from_quality(clarity=0.8, evidence=min(1.0, truth_score/100.0), bias=0.3)
 
     tldr, summary, deep = parse_sections(sum_raw)
-    md = (
-        f"# {title}\n"
-        f"**Generated:** {ts}  \n"
-        f"**Truth Score:** {truth:.1f}/100  \n"
-        f"**Stars (Critical Style):** {stars:.1f}/5\n\n"
-        "## TL;DR\n"
-        "- " + "\n- ".join(tldr) + "\n\n"
-        "## Executive Summary\n"
-        f"{summary}\n\n"
-        "## Deep Dive\n"
-        f"{deep}\n\n"
-        "## Claims & Evidence\n"
-    )
+
+    md = f"""# {title}
+**Generated:** {ts}  
+**Truth Score:** {truth_score:.1f}/100  
+**Stars (Critical Style):** {stars:.1f}/5
+
+## TL;DR
+- {"\n- ".join(tldr)}
+
+## Executive Summary
+{summary}
+
+## Deep Dive
+{deep}
+
+## Claims & Evidence
+"""
     if claim_assessments:
         md += "\n".join(
             f"- **Claim:** {a['claim']['text']}\n"
@@ -176,11 +195,10 @@ def run_pipeline(text: str, source_type: str = "Text", source_url: str = "") -> 
         )
     else:
         md += "_No claims extracted or evidence search unavailable._"
+
     return md
 
-# ─────────────────────────────────────────────────────────────────────────────
 # UI
-
 tab1, tab2 = st.tabs(["YouTube", "Text/Web"])
 
 with tab1:
@@ -193,7 +211,7 @@ with tab1:
         else:
             with st.spinner("Fetching transcript…"):
                 try:
-                    text, _timed = transcript.fetch_transcript_youtube(url)
+                    text, _timed = fetch_transcript_youtube(url)
                 except Exception as e:
                     text = None
                     st.error(f"Transcript fetch failed: {e}")
